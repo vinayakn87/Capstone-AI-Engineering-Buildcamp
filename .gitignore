@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project: mutual fund factsheet RAG
+data/raw_pdfs/*.pdf
+data/processed/*
+!data/raw_pdfs/.gitkeep
+!data/processed/.gitkeep
+chroma_db/
+*.db
+*.sqlite

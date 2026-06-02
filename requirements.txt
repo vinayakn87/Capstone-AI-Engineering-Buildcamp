@@ -1,0 +1,6 @@
+pdfplumber
+chromadb
+streamlit
+sentence-transformers
+openai
+sqlite-utils
