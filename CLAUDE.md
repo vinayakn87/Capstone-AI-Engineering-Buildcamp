@@ -46,6 +46,16 @@ python -m ingestion.pipeline
 streamlit run chat/app.py
 ```
 
+## Testing Protocol
+- After completing each component, write and run a test before moving to the next
+- Test files live in `tests/` and mirror the source: `store/vector_store.py` → `tests/test_store.py`
+- Use a Jupyter notebook (`store/vector_store.ipynb`) for interactive exploration while building; once satisfied, graduate the assertions into a proper `pytest` test file
+- Run individual test files with: `python -m pytest tests/test_<component>.py -v`
+- Integration tests (store layer) must use real backends (real ChromaDB, real SQLite pointed at a temp dir) — no mocks for stores
+- Unit tests (ingestion, scraper) may mock external HTTP calls but not internal logic
+- Each test file should cover: happy path, empty/missing input, and at least one edge case
+- A component is not "done" until its test passes
+
 ## Working Agreement
 - Always ask for explicit approval before calling ExitPlanMode
 - Always ask for explicit approval before writing any code files
