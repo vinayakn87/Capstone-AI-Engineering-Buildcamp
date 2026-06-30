@@ -56,13 +56,15 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
   ┌──────────────────────▼───────────────────────────┐
   │              AGENT (agent/)                       │
   │                                                  │
-  │  retriever.py                                    │
-  │  • searches persistent store (ChromaDB + SQLite) │
+  │  retriever.py  (thin, pure vector search)        │
+  │  • embeds question → searches ChromaDB (top-k)   │
   │  • optionally merges session chunks (Mode 2)     │
-  │  • raises FundNotFoundError if fund absent       │
-  │    (Mode 1 only, when no session PDF either)     │
+  │  • NO has_fund gate, NO FundNotFoundError        │
   │                                                  │
   │  synthesizer.py → OpenAI gpt-4o-mini             │
+  │  • grounding + fund disambiguation               │
+  │  • soft absence ("share what we have" + upload)  │
+  │  • citation table of funds/pages used            │
   └──────────────────────┬───────────────────────────┘
                          │
                          ▼
@@ -73,8 +75,9 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
   │  │  MODE 1: Q&A                                │ │
   │  │  User types question                        │ │
   │  │  → Agent retrieves from KB                  │ │
-  │  │  → FundNotFound? Show upload prompt         │ │
-  │  │    → Upload PDF → ingest into KB → re-query │ │
+  │  │  → Answer + citation table of funds used    │ │
+  │  │  → Unsatisfied / data absent? Upload PDF    │ │
+  │  │    → ingest into KB → re-query              │ │
   │  └─────────────────────────────────────────────┘ │
   │                                                  │
   │  ┌─────────────────────────────────────────────┐ │
@@ -117,19 +120,44 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
 - `scraper/runner.py` — CLI: `python -m scraper.runner` → scrape + download + ingest
 
 ### Step 4 — Agent
+> **DESIGN CHANGE (2026-06-30) — pure-RAG retrieval, no `has_fund` gate.** See the
+> "Design Change Log" at the bottom for what changed and why. Summary: the retriever
+> is now *thin* — embed → vector search → return chunks. It does **not** call
+> `has_fund()` and does **not** raise `FundNotFoundError`. Fund disambiguation and
+> "I don't have this" are handled **downstream in the synthesizer prompt**.
+> `has_fund()` stays in the store interface, unused, reserved for a later agentic phase.
+
 - `agent/retriever.py`:
-  - `retrieve(question, session_chunks=None)` — embeds question → searches persistent ChromaDB + SQLite; if `session_chunks` provided, merges them too; if no results and no session chunks → raises `FundNotFoundError(fund_name)`
-- `agent/synthesizer.py` — context + question → OpenAI → answer
+  - `retrieve(question, session_chunks=None, top_k=5) -> list[Chunk]` — embeds the
+    question → `store.search()` → returns the top-k chunks (each carrying
+    `fund_name`/`source_file`/`page`). If `session_chunks` provided (Mode 2), rank them
+    in-memory by cosine similarity to the query and **merge** with store results, then
+    re-sort and trim to `top_k`. **No `has_fund` gate, no `FundNotFoundError`.**
+- `agent/synthesizer.py` — context + question → OpenAI → answer. The real work now lives here:
+  - **Grounding:** answer ONLY from the retrieved chunks; never invent figures.
+  - **Disambiguation:** chunks may span multiple funds; identify which fund(s) the
+    context covers, answer per-fund when several are plausible, ask a narrowing
+    follow-up when the question is ambiguous.
+  - **Absence ("share what we have"):** when context doesn't cover the question, answer
+    with what it *does* have and invite the user to upload the relevant factsheet (soft,
+    prompt-driven — replaces the old deterministic `FundNotFound` trigger).
+  - **Citation table:** every response includes a table of the actual
+    `fund_name` + `source_file`/`page` the answer drew from.
 - `agent/agent.py`:
   - `ask(question, session_chunks=None) -> AgentResponse`
-  - `AgentResponse`: `Answer(text)` | `FundNotFound(fund_name)`
+  - `AgentResponse`: `Answer(text, sources)` — `sources` feeds the citation table.
+    (No `FundNotFound` variant in this phase; absence is conveyed inside `Answer`.)
 
 ### Step 5 — Chat UI
 - `chat/app.py` — Streamlit app with two modes toggled in sidebar:
 
   **Mode 1 (Q&A):**
-  - Chat input → `agent.ask(question, session_chunks=None)`
-  - `FundNotFound` → display message → show `st.file_uploader` → on upload → `ingest_pdf(path, persist=True)` → re-run query
+  - Chat input → `agent.ask(question, session_chunks=None)` → `Answer` (with the
+    citation table of funds used)
+  - The upload affordance is **always available** (not gated by a `FundNotFound`
+    signal anymore). When the answer indicates it lacks the data — or the user is
+    simply unsatisfied — the user uploads via `st.file_uploader` →
+    `ingest_pdf(path, persist=True)` → re-run query.
 
   **Mode 2 (Direct Upload):**
   - Sidebar PDF uploader → `ingest_pdf(path, persist=False)` → store chunks in `st.session_state.session_chunks`
@@ -149,7 +177,10 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
 | Vector store | ChromaDB (default) | Zero-config embedded; interface abstracted for swap |
 | Session store | In-memory list of Chunk objects | No persistence needed; same retrieval interface |
 | Mode 2 isolation | `persist=False` flag on `ingest_pdf` | Single code path for parsing/chunking; only write is conditional |
-| Missing fund (Mode 1) | `FundNotFoundError` + UI upload prompt | Clean signal; upload triggers `persist=True` ingest |
+| Fund detection | **None in retriever** (pure vector search) | Pure RAG, no intelligence layer between query and retriever; ambiguity/absence handled in synthesizer prompt |
+| Missing fund (Mode 1) | **Soft, prompt-driven** — synthesizer says what it has + invites upload | `has_fund`/`FundNotFoundError` too restrictive for pure RAG; gate deferred to agentic phase |
+| `has_fund()` | Kept in store interface, **unused for now** | Tested + reserved for the agentic phase; bypassing costs nothing, deleting throws away a tested gate |
+| Surfacing funds used | Citation table in every response | User always sees which `fund_name`(s)/pages an answer drew from → guards against silent cross-fund answers |
 | Mode 2 fund gap | No error — use what's in session chunks | User explicitly provided the PDF; we trust it |
 | Embeddings | `sentence-transformers` all-MiniLM-L6-v2 | Local, free, fast; 384-dim vectors |
 | LLM | OpenAI gpt-4o-mini | Good quality/cost ratio for synthesis |
@@ -169,7 +200,7 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
 | `ingestion/pipeline.py` | Core ingestion: `ingest_pdf(path, persist=True/False)` |
 | `scraper/amfi_scraper.py` | AMFI website scraping |
 | `agent/agent.py` | `ask(question, session_chunks=None) -> AgentResponse` |
-| `agent/retriever.py` | Dual-track retrieval + `FundNotFoundError` |
+| `agent/retriever.py` | Thin pure-vector retrieval (+ Mode 2 session merge); **no gate** |
 | `chat/app.py` | Streamlit UI with Mode 1 / Mode 2 toggle |
 | `docs/architecture.md` | Architecture diagram |
 
@@ -183,6 +214,42 @@ Starting from a fully empty codebase (only empty `__init__.py` files exist). The
 1. Run `python -m scraper.runner` — downloads factsheet PDFs into `data/raw_pdfs/`
 2. Run `python -m ingestion.pipeline` — populates ChromaDB + SQLite
 3. **Mode 1:** Run `streamlit run chat/app.py`, ask about a known fund → gets answer
-4. **Mode 1 missing fund:** Ask about an unknown fund → prompted to upload → upload → re-query succeeds → fund now in KB
+4. **Mode 1 missing fund:** Ask about an unknown fund → synthesizer answers that it lacks that data (and shows the citation table of what it *did* find) → user uploads → `ingest_pdf(persist=True)` → re-query succeeds → fund now in KB
 5. **Mode 2:** Switch to Direct Upload mode → upload PDF → ask question → gets answer → verify PDF not in KB after session
 6. Run `python -m pytest tests/` — all tests green
+
+## Design Change Log
+
+### 2026-06-30 — Drop `has_fund` gate; handle ambiguity/absence in the synthesizer
+**What changed.** The retriever no longer detects the fund or gates on `has_fund()`,
+and `FundNotFoundError` is no longer raised in the Q&A path. Retrieval is now pure
+vector search (embed → `search` → return chunks). All fund disambiguation, "answer
+per-fund", "ask a narrowing follow-up", and "I don't have this → upload" behaviour
+moved **into the synthesizer prompt**. Every response carries a **citation table**
+of the actual funds/pages used. `has_fund()` remains implemented and tested in the
+store but is **not called** anywhere in this phase.
+
+**Why.**
+- *Faithful to pure RAG.* The original intent was no intelligence layer between query
+  and retriever. A fund-detection step (regex/lexical/LLM) reintroduced exactly that.
+  Pure vector search + LLM synthesis keeps the retriever dumb.
+- *`has_fund` was too restrictive.* It needs an exact `fund_name` string, but users
+  type free text and shorthand; deriving that string cleanly was the hard, fragile
+  part (every option had a threshold or dependency). Skipping it removes the brittle step.
+- *The LLM is the right tool for ambiguity.* Given chunks spanning several funds,
+  "which fund did you mean / here's per-fund answers" is squarely an LLM strength.
+
+**Accepted tradeoffs (eyes open).**
+- *Missing-fund detection goes from deterministic → probabilistic.* Vector search
+  always returns top-k, even for an absent fund. The synthesizer must notice the
+  mismatch from chunk metadata and say so. Mitigation: pass `fund_name`/`page` into
+  the context **and** show the citation table so the user always sees which funds the
+  answer used; if unsatisfied, they upload.
+- *Cross-fund contamination risk on numeric questions.* Unfiltered top-k can mix
+  funds. Mitigation: surface per-chunk `fund_name` in the context and require the
+  citation table — the load-bearing safeguard against silently answering with the
+  wrong fund's figures.
+
+**Reversibility.** `has_fund()` is untouched in `store/`. Re-introducing a
+deterministic gate (or a hybrid lexical pre-filter) in a later **agentic phase** is a
+small, additive change — nothing here forecloses it.

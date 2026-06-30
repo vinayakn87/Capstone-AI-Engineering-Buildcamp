@@ -16,3 +16,8 @@ dependencies = [
     "sqlite-utils>=3.39",
     "streamlit>=1.58.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: real model / real PDF — slow, skip with -m \"not slow\"",
+]

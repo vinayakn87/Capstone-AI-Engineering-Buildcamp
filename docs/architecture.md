@@ -32,13 +32,13 @@ graph TB
     end
 
     subgraph AGENT["🤖 Agent (agent/)"]
-        RETRIEVER["retriever.py\nsemantic search + structured query\nmerge & rank context\nFundNotFoundError"]
-        SYNTHESIZER["synthesizer.py\nOpenAI gpt-4o-mini\ncontext → answer"]
+        RETRIEVER["retriever.py\nthin pure vector search\nembed → top-k → merge session (Mode 2)\nNO has_fund gate"]
+        SYNTHESIZER["synthesizer.py\nOpenAI gpt-4o-mini\ngrounding · fund disambiguation\nsoft absence · citation table"]
         RETRIEVER --> SYNTHESIZER
     end
 
     subgraph UI["💬 Chat UI (chat/app.py)"]
-        MODE1["Mode 1: Q&A\nAsk question → KB lookup\nFundNotFound → upload prompt\nUpload → ingest into KB"]
+        MODE1["Mode 1: Q&A\nAsk question → KB lookup\nAnswer + citation table of funds\nUnsatisfied/absent → upload → ingest"]
         MODE2["Mode 2: Direct Upload\nUpload PDF → session-only\nAsk question → session + KB\nNever written to KB"]
     end
 
@@ -93,13 +93,15 @@ graph TB
   ┌────────────────────────▼─────────────────────────┐
   │              AGENT (agent/)                       │
   │                                                  │
-  │  retriever.py                                    │
-  │  • searches persistent store (ChromaDB + SQLite) │
+  │  retriever.py  (thin, pure vector search)        │
+  │  • embeds question → searches ChromaDB (top-k)   │
   │  • merges session chunks if provided (Mode 2)    │
-  │  • raises FundNotFoundError if fund absent        │
-  │    (Mode 1 only, when no session PDF either)     │
+  │  • NO has_fund gate, NO FundNotFoundError        │
   │                                                  │
   │  synthesizer.py → OpenAI gpt-4o-mini             │
+  │  • grounding + fund disambiguation               │
+  │  • soft absence ("share what we have" + upload)  │
+  │  • citation table of funds/pages used            │
   └──────────────────────┬───────────────────────────┘
                          │
                          ▼
@@ -110,8 +112,9 @@ graph TB
   │  │  MODE 1: Q&A (knowledge-base driven)        │ │
   │  │  User types question                        │ │
   │  │  → Agent retrieves from KB                  │ │
-  │  │  → FundNotFound? Show upload prompt         │ │
-  │  │    → Upload PDF → ingest into KB → re-query │ │
+  │  │  → Answer + citation table of funds used    │ │
+  │  │  → Unsatisfied / data absent? Upload PDF    │ │
+  │  │    → ingest into KB → re-query              │ │
   │  └─────────────────────────────────────────────┘ │
   │                                                  │
   │  ┌─────────────────────────────────────────────┐ │
@@ -135,9 +138,9 @@ graph TB
 | 4 | Embedder | Text chunks | 384-dim vectors | sentence-transformers |
 | 5 | Vector Store | Embeddings | ChromaDB collection | chromadb |
 | 6 | Structured Store | Fund metadata | SQLite tables | sqlite-utils |
-| 7 | Retriever | User question | Ranked context chunks | sentence-transformers + chromadb |
-| 8 | Synthesizer | Context + question | Natural-language answer | openai (gpt-4o-mini) |
-| 9 | Chat UI | Answer / FundNotFound | Rendered chat message | streamlit |
+| 7 | Retriever | User question | Top-k context chunks (pure vector search; + Mode 2 merge) | sentence-transformers + chromadb |
+| 8 | Synthesizer | Context + question | Answer + citation table (grounding, disambiguation, soft absence) | openai (gpt-4o-mini) |
+| 9 | Chat UI | Answer + sources | Rendered chat message + citation table; upload always available | streamlit |
 
 ## Store Abstraction (Pluggability)
 
