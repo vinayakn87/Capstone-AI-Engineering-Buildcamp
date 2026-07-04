@@ -34,8 +34,10 @@
 #   - `Embedder`            → from ingestion.embedder (embeds the question)
 #
 # Write your imports here:
-
-
+import numpy as np
+from store.base import Chunk
+from store.base import VectorStore
+from ingestion.embedder import Embedder
 
 # -----------------------------------------------------------------------------
 # _cosine_similarity(a: list[float], b: list[float]) -> float
@@ -58,6 +60,20 @@
 #
 # Write _cosine_similarity() here:
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    a = np.array(a)
+    b = np.array(b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+
+    if norm_a != 0 and norm_b != 0:
+        cosine = np.dot(a, b)/(norm_a * norm_b)
+        return float(cosine)
+    
+    return 0.0
+
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -66,6 +82,8 @@
 # WHY: Bundles the store + embedder so a single instance answers many queries
 # without reloading or re-wiring anything.
 # =============================================================================
+
+class Retriever:
 
 # -----------------------------------------------------------------------------
 # __init__(self, store: VectorStore, embedder: Embedder)
@@ -80,7 +98,9 @@
 #
 # Write __init__ here:
 
-
+    def __init__(self, store: VectorStore, embedder: Embedder):
+        self._embedder = embedder
+        self._store = store
 
 # -----------------------------------------------------------------------------
 # retrieve(self, question: str, session_chunks: list[Chunk] | None = None,
@@ -116,3 +136,20 @@
 # for v1 unless tests show duplicates.
 #
 # Write retrieve() here:
+
+    def retrieve(
+            self, 
+            question: str, 
+            session_chunks: list[Chunk] | None = None,
+            top_k: int = 5
+        ) -> list[Chunk]:
+
+        q = self._embedder.embed_one(question)
+        store_hits = self._store.search(q, top_k=top_k)
+        if session_chunks is None:
+            return store_hits
+        
+        candidates = session_chunks + store_hits
+        candidates.sort(key=lambda chunk:_cosine_similarity(q, chunk.embedding), reverse=True)
+        
+        return candidates[:top_k]

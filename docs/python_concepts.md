@@ -172,13 +172,75 @@ removed — inner whitespace untouched. `"  Kotak Fund \n".strip()` → `"Kotak 
 (one side), `.strip("xy")` (strip those *chars*, not whitespace).
 
 ### How do `key=` functions work (`max(candidates, key=font_size)`)?
-`key` is a function `max`/`min`/`sorted` call **once per element** to get a number
-to rank by; it **returns the element**, not the number. Internally: `for el in
-items: score = key(el); keep el with the biggest score`. So `max(lines,
-key=font_size)` ranks lines by their font size but hands back the **line dict**.
-Without `key`, `max` would compare the dicts directly and raise `TypeError`. Pass
-the function (`key=font_size`), not a call (`key=font_size()`). Ties → the
-**first** max-scoring element wins (only `>` replaces the best).
+`key` is a function you hand to `max`/`min`/`sorted`. They call it **once per
+element** to get a number to rank by, then return the **element** (not the number).
+Without `key`, `max` would compare dicts directly and raise `TypeError`. Pass the
+function itself — `key=font_size` — **not** a call — `key=font_size()`.
+
+**`max(candidates, key=font_size)` — pseudocode:**
+```
+best_element = None
+best_score   = -infinity
+for element in candidates:
+    score = font_size(element)      # key called once per element
+    if score > best_score:
+        best_score   = score
+        best_element = element      # remember the element, not the score
+return best_element
+```
+
+**Tracing with real data** (each line's biggest char font size):
+
+| iteration | `element` | `font_size(element)` → score | new best? |
+|---|---|---|---|
+| 1 | `title_line` | 18 | yes (18 > -∞) |
+| 2 | `subtitle_line` | 9 | no (9 < 18) |
+| 3 | `manager_line` | 8 | no (8 < 18) |
+
+Result: `best_element = title_line` — the **title dict** is returned, even though
+the comparison happened on the numbers 18/9/8. Ties → the **first** max-scoring
+element wins (only `>` replaces the best).
+
+---
+
+### How does `sorted(candidates, key=score_fn, reverse=True)` work?
+Same `key=` mechanic as `max`, but instead of returning one winner it returns
+**all elements reordered** by their scores. `reverse=True` puts the highest score
+first (descending).
+
+**Pseudocode:**
+```
+scored = []
+for element in candidates:
+    score = score_fn(element)        # key called once per element
+    scored.append((score, element))  # pair score with element
+
+sort scored by the score value, descending (if reverse=True)
+
+return [element for score, element in scored]  # strip scores, return elements
+```
+
+**Tracing with retriever chunks** ranked by cosine similarity:
+
+| iteration | `element` | `_cosine_similarity(q, element.embedding)` → score |
+|---|---|---|
+| 1 | chunk_A | 0.91 |
+| 2 | chunk_B | 0.45 |
+| 3 | chunk_C | 0.78 |
+| 4 | chunk_D | 0.62 |
+
+After `sorted(..., reverse=True)`:
+
+| rank | `element` | score |
+|---|---|---|
+| 1 | chunk_A | 0.91 |
+| 2 | chunk_C | 0.78 |
+| 3 | chunk_D | 0.62 |
+| 4 | chunk_B | 0.45 |
+
+Returns `[chunk_A, chunk_C, chunk_D, chunk_B]` — chunks reordered, scores
+discarded. In the retriever: `candidates.sort(key=lambda c: _cosine_similarity(q,
+c.embedding), reverse=True)` then `return candidates[:top_k]`.
 
 ### The mutable-default trap, again (`FakePage(tables=[])`)
 A default argument is evaluated **once at definition time** and stored on the
