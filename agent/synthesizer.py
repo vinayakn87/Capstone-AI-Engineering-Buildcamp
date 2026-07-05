@@ -39,7 +39,8 @@
 # (If `openai` isn't installed yet: add it to requirements.txt and pip install.)
 #
 # Write your imports here:
-
+from openai import OpenAI
+from store.base import Chunk
 
 
 # -----------------------------------------------------------------------------
@@ -67,6 +68,22 @@
 #
 # Write the constants here:
 
+_MODEL = "gpt-4o-mini"
+_SYSTEM_PROMPT = """
+You are a mutual fund Q&A agent. Your role is to answer customer queries about mutual funds using the 
+fact sheet data that is available to you. You will **ALWAYS** adhere to the below rules:
+1. Answer ONLY using the provided context; if a fact isn't in the context,
+   do not state it. Never fabricate NAVs, ratios, returns, dates or any other facts.
+2. The context may contain chunks from MULTIPLE funds (each block is labelled
+   with its fund). Identify which fund(s) the question is about; if several
+   funds plausibly match, answer per-fund; if genuinely ambiguous, ask a
+   short clarifying question naming the candidate funds.
+3. If the context does NOT contain what's asked, say plainly that you don't
+   have that data, share whatever relevant info IS present, and suggest the
+   user upload the fund's factsheet. Do not guess.
+4. Be concise; refer to funds by name in prose (the app renders the structured
+   source table separately — you don't need to output a table).'
+"""
 
 
 # -----------------------------------------------------------------------------
@@ -89,6 +106,17 @@
 #
 # Write _format_context() here:
 
+def _format_context(chunks: list[Chunk]) -> str:
+    if not chunks:
+        return "no relevant context found"
+    
+    blocks = []
+    for i, chunk in enumerate(chunks, start=1):
+        header = f"[{i}] Fund: {chunk.fund_name} | Source: {chunk.source_file} | Page: {chunk.page}"
+        block = header + "\n" + chunk.text
+        blocks.append(block)
+
+    return ("\n\n").join(blocks)
 
 
 # -----------------------------------------------------------------------------
@@ -97,7 +125,7 @@
 # WHY: Wraps the OpenAI call behind synthesize(question, chunks) -> str, the exact
 # interface agent.py already depends on.
 # =============================================================================
-
+class Synthesizer:
 # -----------------------------------------------------------------------------
 # __init__(self, model: str = _MODEL, client: OpenAI | None = None)
 #
@@ -111,28 +139,52 @@
 #
 # Write __init__ here:
 
+    def __init__(self, model: str = _MODEL,  client: OpenAI | None = None):
+        self._model = model
+        self._client = client or OpenAI()
 
 
 # -----------------------------------------------------------------------------
 # synthesize(self, question: str, chunks: list[Chunk]) -> str
 #
 # WHY: The one public method — the contract agent.ask() calls. Formats the
-# chunks, builds the two-message prompt, calls OpenAI once, returns the answer.
+# chunks, calls OpenAI once via the RESPONSES API, returns the answer text.
+#
+# NOTE (Responses API, not Chat Completions): we use `client.responses.create`.
+# The mapping from the old chat-completions shape:
+#   - the system message      → the `instructions=` parameter
+#   - the user message content → the `input=` parameter (a plain string is fine)
+#   - the answer text          → `response.output_text` (convenience accessor that
+#                                aggregates the output; NOT choices[0].message...)
 #
 # STEPS:
 #   1. context = _format_context(chunks)
-#   2. Build the messages list:
-#        system → _SYSTEM_PROMPT
-#        user   → f"Context:\n{context}\n\nQuestion: {question}"
-#   3. response = self._client.chat.completions.create(
+#   2. user_input = f"Context:\n{context}\n\nQuestion: {question}"
+#   3. response = self._client.responses.create(
 #          model=self._model,
-#          messages=messages,
-#          temperature=0,          ← low temp: factual, reproducible, less drift
+#          instructions=_SYSTEM_PROMPT,   ← the system/developer prompt goes here
+#          input=user_input,              ← the context + question
+#          temperature=0,                 ← low temp: factual, reproducible, less drift
 #      )
-#   4. return response.choices[0].message.content
+#   4. return response.output_text
 #
 # NOTE: empty chunks are NOT special-cased here — _format_context returns the
 # sentinel and the prompt (instruction #3) produces an honest "I don't have that"
 # answer. Absence handling is the prompt's job, not a Python branch.
 #
 # Write synthesize() here:
+
+    def synthesize(self, question: str, chunks: list[Chunk]) -> str:
+
+        context  = _format_context(chunks)
+        user_prompt = f"""<Context>{context}</Context>
+                          <Question>{question}</Question>""".strip()
+
+        response = self._client.responses.create(
+            model = self._model,
+            instructions =_SYSTEM_PROMPT,
+            input =  user_prompt,
+            temperature = 0
+        )
+
+        return response.output_text
